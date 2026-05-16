@@ -38,14 +38,7 @@ Python 3.9+
 
 建议使用独立虚拟环境，避免依赖包版本冲突。
 
-使用 `venv` 创建环境：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-如果使用 Anaconda，也可以创建 Conda 环境：
+使用 Anaconda，也可以创建 Conda 环境：
 
 ```bash
 conda create -n traffic-flow python=3.9
@@ -72,19 +65,6 @@ pip install numpy pandas scikit-learn xgboost matplotlib seaborn jupyter openpyx
 | `seaborn` | 辅助可视化和统计图绘制 |
 | `jupyter` | 运行 `notebooks/analysis.ipynb` 进行探索性分析 |
 | `openpyxl` | 读写 Excel 文件，便于整理实验结果 |
-
-如需固定依赖版本，可在后续补充 `requirements.txt`。当前推荐版本范围如下：
-
-```text
-numpy>=1.21
-pandas>=1.3
-scikit-learn>=1.0
-xgboost>=1.6
-matplotlib>=3.5
-seaborn>=0.11
-jupyter>=1.0
-openpyxl>=3.0
-```
 
 ### 4. 目录准备
 
@@ -160,4 +140,3 @@ python src/evaluate.py
 - 最终提交文件需要包含 `tollgate_id`、`time_window`、`direction`、`volume` 四个字段。
 - `volume` 预测值应保证非负。
 - 如在不同电脑上运行，建议统一 Python 版本和依赖库版本，减少结果差异。
-# Data-and-Algorithm-Major-Project
