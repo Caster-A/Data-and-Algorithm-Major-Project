@@ -1,0 +1,27 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Data and generated artifacts
+data/raw/*
+data/processed/*
+data/submission/*
+figures/*
+report/*.pptx
+report/*.pdf
+report/*.docx
+
+# Keep directory placeholders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/submission/.gitkeep
+!figures/.gitkeep
+!report/.gitkeep
+
+# Model artifacts
+*.model
+*.pkl
+*.joblib
