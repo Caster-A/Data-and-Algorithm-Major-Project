@@ -38,14 +38,7 @@ Python 3.9+
 
 建议使用独立虚拟环境，避免依赖包版本冲突。
 
-使用 `venv` 创建环境：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-如果使用 Anaconda，也可以创建 Conda 环境：
+使用 Anaconda，也可以创建 Conda 环境：
 
 ```bash
 conda create -n traffic-flow python=3.9
