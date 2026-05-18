@@ -146,6 +146,100 @@ def build_session_samples(
     return result
 
 
+def prepare_history_volume(*volume_frames: pd.DataFrame) -> pd.DataFrame:
+    """整理历史流量表，用于构造只依赖过去的周期统计特征。"""
+    history = pd.concat(volume_frames, ignore_index=True)
+    history = history[
+        ["time_window_start", "tollgate_id", "direction", "volume", "window_index", "weekday"]
+    ].copy()
+    history = history.drop_duplicates(
+        subset=["time_window_start", "tollgate_id", "direction"], keep="last"
+    )
+    history = history.sort_values(["tollgate_id", "direction", "time_window_start"])
+    return history.reset_index(drop=True)
+
+
+def _safe_stat(values: pd.Series, method: str) -> float:
+    """计算历史统计量；没有可用历史时返回 NaN，后续统一填补。"""
+    if values.empty:
+        return np.nan
+    if method == "mean":
+        return float(values.mean())
+    if method == "median":
+        return float(values.median())
+    if method == "std":
+        return float(values.std(ddof=0))
+    if method == "last":
+        return float(values.iloc[-1])
+    raise ValueError(f"Unsupported stat method: {method}")
+
+
+def add_historical_features(samples: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    """为样本加入同组合、同窗口、同星期等历史周期统计特征。"""
+    if samples.empty:
+        return samples
+
+    global_mean = float(history["volume"].mean())
+    rows = []
+    for _, sample in samples.iterrows():
+        target_time = sample["target_time"]
+        base_mask = (
+            (history["tollgate_id"] == sample["tollgate_id"])
+            & (history["direction"] == sample["direction"])
+            & (history["time_window_start"] < target_time)
+        )
+        combo_history = history.loc[base_mask]
+        same_window_history = combo_history[
+            combo_history["window_index"] == sample["window_index"]
+        ]
+        same_weekday_window_history = same_window_history[
+            same_window_history["weekday"] == sample["weekday"]
+        ]
+        recent_3day_history = same_window_history[
+            same_window_history["time_window_start"]
+            >= target_time - pd.Timedelta(days=3)
+        ]
+        recent_7day_history = same_window_history[
+            same_window_history["time_window_start"]
+            >= target_time - pd.Timedelta(days=7)
+        ]
+        previous_day_time = target_time - pd.Timedelta(days=1)
+        previous_day_value = history.loc[
+            base_mask & (history["time_window_start"] == previous_day_time),
+            "volume",
+        ]
+
+        history_features = {
+            "hist_combo_mean": _safe_stat(combo_history["volume"], "mean"),
+            "hist_combo_median": _safe_stat(combo_history["volume"], "median"),
+            "hist_combo_window_mean": _safe_stat(
+                same_window_history["volume"], "mean"
+            ),
+            "hist_combo_window_median": _safe_stat(
+                same_window_history["volume"], "median"
+            ),
+            "hist_combo_window_std": _safe_stat(same_window_history["volume"], "std"),
+            "hist_combo_weekday_window_mean": _safe_stat(
+                same_weekday_window_history["volume"], "mean"
+            ),
+            "hist_combo_weekday_window_median": _safe_stat(
+                same_weekday_window_history["volume"], "median"
+            ),
+            "recent_3day_same_window_mean": _safe_stat(
+                recent_3day_history["volume"], "mean"
+            ),
+            "recent_7day_same_window_mean": _safe_stat(
+                recent_7day_history["volume"], "mean"
+            ),
+            "previous_day_same_window_volume": _safe_stat(previous_day_value, "last"),
+        }
+        rows.append(history_features)
+
+    history_features = pd.DataFrame(rows)
+    history_features = history_features.fillna(global_mean)
+    return pd.concat([samples.reset_index(drop=True), history_features], axis=1)
+
+
 def load_weather_features() -> pd.DataFrame:
     """读取训练和测试天气，并转成可按时间向后匹配的特征表。"""
     weather_frames = []
@@ -300,6 +394,11 @@ def save_feature_tables() -> None:
         start_dates=predict_dates,
         include_target=False,
     )
+
+    train_history = prepare_history_volume(train_volume)
+    predict_history = prepare_history_volume(train_volume, test_known_volume)
+    train_samples = add_historical_features(train_samples, train_history)
+    predict_samples = add_historical_features(predict_samples, predict_history)
 
     train_features = finalize_features(
         merge_weather(train_samples, weather), route_features
