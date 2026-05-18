@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+.vscode/
 
 # Data and generated artifacts
 data/raw/*
