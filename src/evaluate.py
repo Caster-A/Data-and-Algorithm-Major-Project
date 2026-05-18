@@ -165,6 +165,39 @@ def plot_mape_by_scope(group_metrics: pd.DataFrame, scope: str, filename: str) -
     plt.close()
 
 
+def plot_daily_average_volume(validation: pd.DataFrame) -> None:
+    """绘制按日期聚合的真实与预测平均流量折线图。"""
+    best_model, best_pred_col = choose_best_prediction_column(validation)
+    daily_avg = (
+        validation.assign(date=validation["target_time"].dt.strftime("%m-%d"))
+        .groupby("date", as_index=False)
+        .agg(actual=("target_volume", "mean"), predicted=(best_pred_col, "mean"))
+    )
+    plot_df = daily_avg.melt(
+        id_vars="date",
+        value_vars=["actual", "predicted"],
+        var_name="series",
+        value_name="average_volume",
+    )
+
+    plt.figure(figsize=(9, 4.2))
+    sns.lineplot(
+        data=plot_df,
+        x="date",
+        y="average_volume",
+        hue="series",
+        marker="o",
+        linewidth=2.4,
+        palette={"actual": "#2563eb", "predicted": "#dc2626"},
+    )
+    plt.title(f"Validation Daily Average Volume: actual vs {best_model}")
+    plt.xlabel("date")
+    plt.ylabel("average volume")
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "validation_daily_avg_volume.png")
+    plt.close()
+
+
 def choose_best_model_from_group_metrics(group_metrics: pd.DataFrame) -> str:
     """根据整体验证 MAPE 选择当前最佳模型名。"""
     overall = group_metrics[
@@ -201,6 +234,7 @@ def save_figures(validation: pd.DataFrame, group_metrics: pd.DataFrame) -> None:
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     set_plot_style()
     plot_actual_vs_pred(validation)
+    plot_daily_average_volume(validation)
     plot_mape_by_scope(group_metrics, "combo_id", "mape_by_combo.png")
     plot_mape_by_scope(group_metrics, "session", "mape_by_session.png")
     plot_mape_by_scope(group_metrics, "horizon_step", "mape_by_horizon.png")
@@ -255,6 +289,7 @@ def build_report(
             "## 4. 生成图表",
             "",
             "- `figures/validation_actual_vs_pred.png`",
+            "- `figures/validation_daily_avg_volume.png`",
             "- `figures/mape_by_combo.png`",
             "- `figures/mape_by_session.png`",
             "- `figures/mape_by_horizon.png`",
