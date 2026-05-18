@@ -37,6 +37,9 @@ EXCLUDE_FEATURE_COLS = {
     "combo_id",
 }
 SUBMISSION_COLUMNS = ["tollgate_id", "time_window", "direction", "volume"]
+PER_COMBO_PRED_COL = "per_combo_xgboost_pred"
+UNIFIED_PRED_COL = "xgboost_pred"
+HYBRID_PRED_COL = "hybrid_xgboost_pred"
 
 
 def load_feature_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -107,10 +110,37 @@ def clipped_predict(model, features: pd.DataFrame, feature_cols: list[str]) -> n
     return np.clip(predictions, a_min=0, a_max=None)
 
 
+def fit_predict_per_combo(
+    train_part: pd.DataFrame,
+    predict_part: pd.DataFrame,
+    feature_cols: list[str],
+) -> np.ndarray:
+    """为每个收费站方向组合单独训练 XGBoost 并预测对应组合。"""
+    predictions = pd.Series(index=predict_part.index, dtype=float)
+
+    for combo_id, combo_train in train_part.groupby("combo_id"):
+        combo_predict = predict_part[predict_part["combo_id"] == combo_id]
+        if combo_predict.empty:
+            continue
+
+        model = build_xgboost_model()
+        model.fit(combo_train[feature_cols], combo_train[TARGET_COL])
+        predictions.loc[combo_predict.index] = clipped_predict(
+            model, combo_predict, feature_cols
+        )
+
+    if predictions.isna().any():
+        missing_combos = predict_part.loc[predictions.isna(), "combo_id"].unique()
+        raise ValueError(f"分组合模型缺少预测结果: {missing_combos}")
+
+    return predictions.loc[predict_part.index].to_numpy()
+
+
 def build_validation_predictions(
     valid_part: pd.DataFrame,
     ridge_pred: np.ndarray,
     xgb_pred: np.ndarray,
+    per_combo_xgb_pred: np.ndarray,
 ) -> pd.DataFrame:
     """整理验证集预测结果，方便后续误差分析和报告引用。"""
     result_cols = [
@@ -125,7 +155,8 @@ def build_validation_predictions(
     ]
     result = valid_part[result_cols].copy()
     result["ridge_pred"] = ridge_pred
-    result["xgboost_pred"] = xgb_pred
+    result[UNIFIED_PRED_COL] = xgb_pred
+    result[PER_COMBO_PRED_COL] = per_combo_xgb_pred
     result["ridge_abs_pct_error"] = np.where(
         result[TARGET_COL] != 0,
         np.abs(result[TARGET_COL] - result["ridge_pred"]) / result[TARGET_COL],
@@ -133,12 +164,63 @@ def build_validation_predictions(
     )
     result["xgboost_abs_pct_error"] = np.where(
         result[TARGET_COL] != 0,
-        np.abs(result[TARGET_COL] - result["xgboost_pred"]) / result[TARGET_COL],
+        np.abs(result[TARGET_COL] - result[UNIFIED_PRED_COL]) / result[TARGET_COL],
+        np.nan,
+    )
+    result["per_combo_xgboost_abs_pct_error"] = np.where(
+        result[TARGET_COL] != 0,
+        np.abs(result[TARGET_COL] - result[PER_COMBO_PRED_COL]) / result[TARGET_COL],
         np.nan,
     )
     return result.sort_values(["target_time", "tollgate_id", "direction"]).reset_index(
         drop=True
     )
+
+
+def choose_combo_model_map(validation_predictions: pd.DataFrame) -> dict[str, str]:
+    """为每个组合选择统一 XGBoost 或 per-combo XGBoost 中验证 MAPE 更低者。"""
+    combo_model_map = {}
+    for combo_id, group_df in validation_predictions.groupby("combo_id"):
+        unified_mape = calculate_mape(group_df[TARGET_COL], group_df[UNIFIED_PRED_COL])
+        per_combo_mape = calculate_mape(group_df[TARGET_COL], group_df[PER_COMBO_PRED_COL])
+        combo_model_map[combo_id] = (
+            "per_combo_xgboost" if per_combo_mape < unified_mape else "xgboost"
+        )
+    return combo_model_map
+
+
+def add_hybrid_predictions(
+    validation_predictions: pd.DataFrame,
+    combo_model_map: dict[str, str],
+) -> pd.DataFrame:
+    """按组合选择更优 XGBoost 版本，生成混合验证预测。"""
+    result = validation_predictions.copy()
+    result[HYBRID_PRED_COL] = np.where(
+        result["combo_id"].map(combo_model_map) == "per_combo_xgboost",
+        result[PER_COMBO_PRED_COL],
+        result[UNIFIED_PRED_COL],
+    )
+    result["hybrid_xgboost_abs_pct_error"] = np.where(
+        result[TARGET_COL] != 0,
+        np.abs(result[TARGET_COL] - result[HYBRID_PRED_COL]) / result[TARGET_COL],
+        np.nan,
+    )
+    result["combo_selected_model"] = result["combo_id"].map(combo_model_map)
+    return result
+
+
+def build_hybrid_submission_predictions(
+    predict_features: pd.DataFrame,
+    unified_predictions: np.ndarray,
+    per_combo_predictions: np.ndarray,
+    combo_model_map: dict[str, str],
+) -> np.ndarray:
+    """根据验证集组合级选择结果生成混合提交预测。"""
+    use_per_combo = (
+        predict_features["combo_id"].map(combo_model_map).fillna("xgboost")
+        == "per_combo_xgboost"
+    )
+    return np.where(use_per_combo, per_combo_predictions, unified_predictions)
 
 
 def build_metrics(validation_predictions: pd.DataFrame) -> pd.DataFrame:
@@ -153,7 +235,15 @@ def build_metrics(validation_predictions: pd.DataFrame) -> pd.DataFrame:
             ),
             "xgboost_mape": calculate_mape(
                 validation_predictions[TARGET_COL],
-                validation_predictions["xgboost_pred"],
+                validation_predictions[UNIFIED_PRED_COL],
+            ),
+            "per_combo_xgboost_mape": calculate_mape(
+                validation_predictions[TARGET_COL],
+                validation_predictions[PER_COMBO_PRED_COL],
+            ),
+            "hybrid_xgboost_mape": calculate_mape(
+                validation_predictions[TARGET_COL],
+                validation_predictions[HYBRID_PRED_COL],
             ),
             "rows": len(validation_predictions),
         }
@@ -169,7 +259,13 @@ def build_metrics(validation_predictions: pd.DataFrame) -> pd.DataFrame:
                         group_df[TARGET_COL], group_df["ridge_pred"]
                     ),
                     "xgboost_mape": calculate_mape(
-                        group_df[TARGET_COL], group_df["xgboost_pred"]
+                        group_df[TARGET_COL], group_df[UNIFIED_PRED_COL]
+                    ),
+                    "per_combo_xgboost_mape": calculate_mape(
+                        group_df[TARGET_COL], group_df[PER_COMBO_PRED_COL]
+                    ),
+                    "hybrid_xgboost_mape": calculate_mape(
+                        group_df[TARGET_COL], group_df[HYBRID_PRED_COL]
                     ),
                     "rows": len(group_df),
                 }
@@ -228,10 +324,23 @@ def validate_outputs(
         raise ValueError("提交文件存在缺失预测值。")
     if (submission["volume"] < 0).any():
         raise ValueError("提交文件存在负流量预测。")
-    if validation_predictions[[TARGET_COL, "ridge_pred", "xgboost_pred"]].isna().any().any():
+    required_cols = [
+        TARGET_COL,
+        "ridge_pred",
+        UNIFIED_PRED_COL,
+        PER_COMBO_PRED_COL,
+        HYBRID_PRED_COL,
+    ]
+    if validation_predictions[required_cols].isna().any().any():
         raise ValueError("验证集预测结果存在缺失值。")
-    if not {"ridge_mape", "xgboost_mape"}.issubset(metrics.columns):
-        raise ValueError("模型指标缺少 ridge_mape 或 xgboost_mape。")
+    required_metric_cols = {
+        "ridge_mape",
+        "xgboost_mape",
+        "per_combo_xgboost_mape",
+        "hybrid_xgboost_mape",
+    }
+    if not required_metric_cols.issubset(metrics.columns):
+        raise ValueError(f"模型指标缺少必要字段: {required_metric_cols - set(metrics.columns)}")
 
 
 def print_metric_summary(metrics: pd.DataFrame) -> None:
@@ -240,6 +349,8 @@ def print_metric_summary(metrics: pd.DataFrame) -> None:
     print("Validation MAPE")
     print(f"  Ridge:   {overall['ridge_mape']:.6f}")
     print(f"  XGBoost: {overall['xgboost_mape']:.6f}")
+    print(f"  Per-combo XGBoost: {overall['per_combo_xgboost_mape']:.6f}")
+    print(f"  Hybrid XGBoost: {overall['hybrid_xgboost_mape']:.6f}")
 
     for scope in ["combo_id", "session"]:
         print(f"\nMAPE by {scope}")
@@ -248,7 +359,10 @@ def print_metric_summary(metrics: pd.DataFrame) -> None:
             print(
                 f"  {row['group']}: "
                 f"ridge={row['ridge_mape']:.6f}, "
-                f"xgboost={row['xgboost_mape']:.6f}, rows={int(row['rows'])}"
+                f"xgboost={row['xgboost_mape']:.6f}, "
+                f"per_combo={row['per_combo_xgboost_mape']:.6f}, "
+                f"hybrid={row['hybrid_xgboost_mape']:.6f}, "
+                f"rows={int(row['rows'])}"
             )
 
 
@@ -280,12 +394,53 @@ def main() -> None:
     xgb_model.fit(train_part[feature_cols], train_part[TARGET_COL])
     xgb_pred = clipped_predict(xgb_model, valid_part, feature_cols)
 
-    validation_predictions = build_validation_predictions(valid_part, ridge_pred, xgb_pred)
+    per_combo_xgb_pred = fit_predict_per_combo(train_part, valid_part, feature_cols)
+
+    validation_predictions = build_validation_predictions(
+        valid_part, ridge_pred, xgb_pred, per_combo_xgb_pred
+    )
+    combo_model_map = choose_combo_model_map(validation_predictions)
+    validation_predictions = add_hybrid_predictions(
+        validation_predictions, combo_model_map
+    )
     metrics = build_metrics(validation_predictions)
 
     final_model = build_xgboost_model()
     final_model.fit(train_features[feature_cols], train_features[TARGET_COL])
-    submission_pred = clipped_predict(final_model, predict_features, feature_cols)
+    unified_submission_pred = clipped_predict(final_model, predict_features, feature_cols)
+
+    per_combo_submission_pred = fit_predict_per_combo(
+        train_features, predict_features, feature_cols
+    )
+    hybrid_submission_pred = build_hybrid_submission_predictions(
+        predict_features,
+        unified_submission_pred,
+        per_combo_submission_pred,
+        combo_model_map,
+    )
+    overall_metrics = metrics.loc[metrics["scope"] == "overall"].iloc[0]
+    model_predictions = {
+        "xgboost": unified_submission_pred,
+        "per_combo_xgboost": per_combo_submission_pred,
+        "hybrid_xgboost": hybrid_submission_pred,
+    }
+    selected_model = min(
+        model_predictions,
+        key=lambda name: overall_metrics[f"{name}_mape"],
+    )
+    submission_pred = model_predictions[selected_model]
+
+    metrics["selected_for_submission"] = metrics["scope"].eq("overall") & metrics[
+        "group"
+    ].eq("all")
+    metrics["selected_model"] = np.where(
+        metrics["selected_for_submission"], selected_model, ""
+    )
+    metrics["combo_model_map"] = np.where(
+        metrics["scope"].eq("combo_id"),
+        metrics["group"].map(combo_model_map).fillna(""),
+        "",
+    )
     submission = build_submission(predict_features, submission_pred, submission_template)
 
     validate_outputs(submission, validation_predictions, metrics, submission_template)

@@ -28,6 +28,12 @@ SUBMISSION_PATH = SUBMISSION_DIR / "submission_phase1.csv"
 SUBMISSION_TEMPLATE_PATH = SUBMISSION_DIR / "submission_template_phase1.csv"
 
 SUBMISSION_COLUMNS = ["tollgate_id", "time_window", "direction", "volume"]
+MODEL_PREDICTION_COLUMNS = {
+    "ridge": "ridge_pred",
+    "xgboost": "xgboost_pred",
+    "per_combo_xgboost": "per_combo_xgboost_pred",
+    "hybrid_xgboost": "hybrid_xgboost_pred",
+}
 
 
 def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -74,8 +80,13 @@ def validate_submission(submission: pd.DataFrame, template: pd.DataFrame) -> lis
 
 
 def build_group_metrics(validation: pd.DataFrame) -> pd.DataFrame:
-    """按多个维度统计 Ridge 和 XGBoost 的 MAPE。"""
+    """按多个维度统计各模型的 MAPE。"""
     rows = []
+    available_models = {
+        model_name: pred_col
+        for model_name, pred_col in MODEL_PREDICTION_COLUMNS.items()
+        if pred_col in validation.columns
+    }
     group_specs = [
         ("overall", None),
         ("combo_id", "combo_id"),
@@ -95,19 +106,12 @@ def build_group_metrics(validation: pd.DataFrame) -> pd.DataFrame:
             grouped = validation.groupby(group_col)
 
         for group, group_df in grouped:
-            rows.append(
-                {
-                    "scope": scope,
-                    "group": str(group),
-                    "ridge_mape": calculate_mape(
-                        group_df["target_volume"], group_df["ridge_pred"]
-                    ),
-                    "xgboost_mape": calculate_mape(
-                        group_df["target_volume"], group_df["xgboost_pred"]
-                    ),
-                    "rows": len(group_df),
-                }
-            )
+            row = {"scope": scope, "group": str(group), "rows": len(group_df)}
+            for model_name, pred_col in available_models.items():
+                row[f"{model_name}_mape"] = calculate_mape(
+                    group_df["target_volume"], group_df[pred_col]
+                )
+            rows.append(row)
 
     result = pd.DataFrame(rows)
     return result.sort_values(["scope", "group"]).reset_index(drop=True)
@@ -124,19 +128,20 @@ def set_plot_style() -> None:
 
 
 def plot_actual_vs_pred(validation: pd.DataFrame) -> None:
-    """绘制验证集真实值与 XGBoost 预测值散点图。"""
+    """绘制验证集真实值与当前最佳模型预测值散点图。"""
+    best_model, best_pred_col = choose_best_prediction_column(validation)
     plt.figure(figsize=(7, 6))
     sns.scatterplot(
         data=validation,
         x="target_volume",
-        y="xgboost_pred",
+        y=best_pred_col,
         hue="session",
         alpha=0.7,
         s=28,
     )
-    max_value = max(validation["target_volume"].max(), validation["xgboost_pred"].max())
+    max_value = max(validation["target_volume"].max(), validation[best_pred_col].max())
     plt.plot([0, max_value], [0, max_value], color="black", linewidth=1, linestyle="--")
-    plt.title("Validation Actual vs XGBoost Prediction")
+    plt.title(f"Validation Actual vs {best_model} Prediction")
     plt.xlabel("Actual volume")
     plt.ylabel("Predicted volume")
     plt.tight_layout()
@@ -145,17 +150,51 @@ def plot_actual_vs_pred(validation: pd.DataFrame) -> None:
 
 
 def plot_mape_by_scope(group_metrics: pd.DataFrame, scope: str, filename: str) -> None:
-    """绘制某个分组维度下的 XGBoost MAPE 柱状图。"""
+    """绘制某个分组维度下当前最佳模型的 MAPE 柱状图。"""
+    best_model = choose_best_model_from_group_metrics(group_metrics)
+    metric_col = f"{best_model}_mape"
     plot_df = group_metrics[group_metrics["scope"] == scope].copy()
-    plot_df["xgboost_mape_pct"] = plot_df["xgboost_mape"] * 100
+    plot_df["best_mape_pct"] = plot_df[metric_col] * 100
     plt.figure(figsize=(7, 4.5))
-    sns.barplot(data=plot_df, x="group", y="xgboost_mape_pct", color="#4C78A8")
-    plt.title(f"XGBoost MAPE by {scope}")
+    sns.barplot(data=plot_df, x="group", y="best_mape_pct", color="#4C78A8")
+    plt.title(f"{best_model} MAPE by {scope}")
     plt.xlabel(scope)
     plt.ylabel("MAPE (%)")
     plt.tight_layout()
     plt.savefig(FIGURES_DIR / filename)
     plt.close()
+
+
+def choose_best_model_from_group_metrics(group_metrics: pd.DataFrame) -> str:
+    """根据整体验证 MAPE 选择当前最佳模型名。"""
+    overall = group_metrics[
+        (group_metrics["scope"] == "overall") & (group_metrics["group"] == "all")
+    ].iloc[0]
+    candidate_cols = [
+        col for col in group_metrics.columns if col.endswith("_mape") and col != "ridge_mape"
+    ]
+    if not candidate_cols:
+        return "ridge"
+    best_col = min(candidate_cols, key=lambda col: overall[col])
+    return best_col.removesuffix("_mape")
+
+
+def choose_best_prediction_column(validation: pd.DataFrame) -> tuple[str, str]:
+    """根据验证集 MAPE 选择当前最佳非 Ridge 预测列。"""
+    candidate_models = {
+        name: col
+        for name, col in MODEL_PREDICTION_COLUMNS.items()
+        if name != "ridge" and col in validation.columns
+    }
+    if not candidate_models:
+        return "ridge", "ridge_pred"
+    best_model = min(
+        candidate_models,
+        key=lambda name: calculate_mape(
+            validation["target_volume"], validation[candidate_models[name]]
+        ),
+    )
+    return best_model, candidate_models[best_model]
 
 
 def save_figures(validation: pd.DataFrame, group_metrics: pd.DataFrame) -> None:
@@ -176,14 +215,16 @@ def build_report(
     overall = group_metrics[
         (group_metrics["scope"] == "overall") & (group_metrics["group"] == "all")
     ].iloc[0]
+    best_model = choose_best_model_from_group_metrics(group_metrics)
+    best_metric_col = f"{best_model}_mape"
     worst_combo = (
         group_metrics[group_metrics["scope"] == "combo_id"]
-        .sort_values("xgboost_mape", ascending=False)
+        .sort_values(best_metric_col, ascending=False)
         .iloc[0]
     )
     worst_horizon = (
         group_metrics[group_metrics["scope"] == "horizon_step"]
-        .sort_values("xgboost_mape", ascending=False)
+        .sort_values(best_metric_col, ascending=False)
         .iloc[0]
     )
 
@@ -194,6 +235,9 @@ def build_report(
         "",
         f"- Ridge MAPE：`{overall['ridge_mape']:.6f}`",
         f"- XGBoost MAPE：`{overall['xgboost_mape']:.6f}`",
+        f"- Per-combo XGBoost MAPE：`{overall.get('per_combo_xgboost_mape', float('nan')):.6f}`",
+        f"- Hybrid XGBoost MAPE：`{overall.get('hybrid_xgboost_mape', float('nan')):.6f}`",
+        f"- 当前最佳模型：`{best_model}`",
         f"- 验证样本数：`{int(overall['rows'])}`",
         "",
         "## 2. 提交文件检查",
@@ -205,8 +249,8 @@ def build_report(
             "",
             "## 3. 主要误差来源",
             "",
-            f"- 当前误差最高的收费站方向组合是 `{worst_combo['group']}`，XGBoost MAPE 为 `{worst_combo['xgboost_mape']:.6f}`。",
-            f"- 当前误差最高的预测步长是 `horizon_step={worst_horizon['group']}`，XGBoost MAPE 为 `{worst_horizon['xgboost_mape']:.6f}`。",
+            f"- 当前误差最高的收费站方向组合是 `{worst_combo['group']}`，{best_model} MAPE 为 `{worst_combo[best_metric_col]:.6f}`。",
+            f"- 当前误差最高的预测步长是 `horizon_step={worst_horizon['group']}`，{best_model} MAPE 为 `{worst_horizon[best_metric_col]:.6f}`。",
             "",
             "## 4. 生成图表",
             "",
@@ -218,8 +262,8 @@ def build_report(
             "## 5. 后续建议",
             "",
             "- 优先分析高误差组合和高误差预测步长。",
-            "- 增加历史周期统计特征，例如同星期、同窗口均值。",
-            "- 尝试按 `combo_id` 分别训练 XGBoost。",
+            "- 对比统一 XGBoost 和 per-combo XGBoost 的分组表现。",
+            "- 如果 per-combo 只改善部分组合，可尝试混合模型策略。",
             "- 在验证集上比较后，再考虑 ExtraTrees 或 RandomForest 融合。",
         ]
     )
@@ -258,9 +302,15 @@ def main() -> None:
     overall = group_metrics[
         (group_metrics["scope"] == "overall") & (group_metrics["group"] == "all")
     ].iloc[0]
+    best_model = choose_best_model_from_group_metrics(group_metrics)
     print("Evaluation completed.")
     print(f"Ridge MAPE: {overall['ridge_mape']:.6f}")
     print(f"XGBoost MAPE: {overall['xgboost_mape']:.6f}")
+    if "per_combo_xgboost_mape" in overall:
+        print(f"Per-combo XGBoost MAPE: {overall['per_combo_xgboost_mape']:.6f}")
+    if "hybrid_xgboost_mape" in overall:
+        print(f"Hybrid XGBoost MAPE: {overall['hybrid_xgboost_mape']:.6f}")
+    print(f"Best model: {best_model}")
     print(f"Group metrics: {PROCESSED_DIR / 'evaluation_group_metrics.csv'}")
     print(f"Report: {REPORT_DIR / '模型评估摘要.md'}")
     print(f"Figures: {FIGURES_DIR}")
