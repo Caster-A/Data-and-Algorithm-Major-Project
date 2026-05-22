@@ -50,7 +50,7 @@ conda activate traffic-flow
 项目建议安装以下 Python 依赖：
 
 ```bash
-pip install numpy pandas scikit-learn xgboost matplotlib seaborn jupyter openpyxl
+pip install -r requirements.txt
 ```
 
 各依赖用途如下：
@@ -65,6 +65,8 @@ pip install numpy pandas scikit-learn xgboost matplotlib seaborn jupyter openpyx
 | `seaborn` | 辅助可视化和统计图绘制 |
 | `jupyter` | 运行 `notebooks/analysis.ipynb` 进行探索性分析 |
 | `openpyxl` | 读写 Excel 文件，便于整理实验结果 |
+| `streamlit` | 构建课堂汇报用交互式 Web 可视化 |
+| `plotly` | 绘制交互式路网示意、趋势图和热力图 |
 
 ### 4. 目录准备
 
@@ -140,3 +142,36 @@ python src/evaluate.py
 - 最终提交文件需要包含 `tollgate_id`、`time_window`、`direction`、`volume` 四个字段。
 - `volume` 预测值应保证非负。
 - 如在不同电脑上运行，建议统一 Python 版本和依赖库版本，减少结果差异。
+
+### 8. Streamlit 可视化展示
+
+项目根目录提供 `streamlit_app.py`，用于课堂汇报时展示历史观测与预测期车流量。页面包含筛选器、收费站路网示意图、当前窗口柱状图、日期内趋势图和热力图。
+
+启动方式：
+
+```bash
+streamlit run streamlit_app.py
+```
+
+可视化依赖以下文件：
+
+- `data/processed/volume_observed_20min.csv`
+- `data/submission/submission_phase1.csv`
+
+如果上述文件不存在，请先按推荐运行顺序执行数据清洗、特征工程和模型训练脚本。
+
+### 9. HTML 汇报版可视化
+
+如果不想启动 Streamlit，可以使用纯 HTML 汇报页面：
+
+```bash
+python src/build_html_visualization.py
+```
+
+生成文件：
+
+```text
+visualization/traffic_flow_dashboard.html
+```
+
+该 HTML 会把历史观测和预测结果直接内嵌到页面中，双击或用浏览器打开即可展示。页面支持日期、时段、20 分钟窗口、数据来源和收费站方向组合筛选，也支持播放时间窗口。
