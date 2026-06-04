@@ -133,7 +133,7 @@ python src/evaluate.py
 - `src/data_cleaning.py` 负责数据清洗、异常值处理和 20 分钟窗口聚合。
 - `src/feature_engineering.py` 负责滑动窗口样本构造和多源特征融合。
 - `src/train_model.py` 负责基线模型、XGBoost 模型训练与预测。
-- `src/evaluate.py` 负责 MAPE 计算、误差分析和提交文件检查。
+- `src/evaluate.py` 负责 MAPE / RMSE 计算、误差分析和提交文件检查。
 
 ### 7. 注意事项
 

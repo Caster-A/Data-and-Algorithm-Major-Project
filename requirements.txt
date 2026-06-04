@@ -8,3 +8,9 @@ jupyter
 openpyxl
 streamlit
 plotly
+
+
+rmse指标
+多指标参考
+加入图神经网络
+测试集数据加入训练集中增大训练数据量

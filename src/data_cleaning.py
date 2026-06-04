@@ -133,11 +133,11 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def mark_and_smooth_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    """按组合和日内窗口标记异常流量，并给出只基于过去窗口的平滑参考列。"""
+    """按组合、日内窗口和周末类型标记异常流量，并给出历史同期平滑参考列。"""
     result = df.sort_values(
         ["tollgate_id", "direction", "time_window_start"]
     ).copy()
-    group_cols = ["tollgate_id", "direction", "window_index"]
+    group_cols = ["tollgate_id", "direction", "window_index", "is_weekend"]
 
     stats = (
         result.groupby(group_cols)["volume"]
@@ -158,17 +158,28 @@ def mark_and_smooth_outliers(df: pd.DataFrame) -> pd.DataFrame:
         | (result["volume"] > result["upper_bound"])
     ).astype(int)
 
+    historical_same_weekend_median = (
+        result.groupby(group_cols)["volume"]
+        .transform(lambda x: x.shift(1).expanding(min_periods=3).median())
+    )
+    historical_same_window_median = (
+        result.groupby(["tollgate_id", "direction", "window_index"])["volume"]
+        .transform(lambda x: x.shift(1).expanding(min_periods=3).median())
+    )
     past_rolling_median = (
         result.groupby(["tollgate_id", "direction"])["volume"]
         .transform(lambda x: x.shift(1).rolling(window=3, min_periods=1).median())
     )
-    past_rolling_median = (
-        past_rolling_median.fillna(result["volume"])
+    smooth_reference = (
+        historical_same_weekend_median
+        .fillna(historical_same_window_median)
+        .fillna(past_rolling_median)
+        .fillna(result["volume"])
         .round()
         .astype(int)
     )
     result["volume_smooth"] = np.where(
-        result["is_outlier"] == 1, past_rolling_median, result["volume"]
+        result["is_outlier"] == 1, smooth_reference, result["volume"]
     ).astype(int)
     result = result.drop(columns=["lower_bound", "upper_bound"])
     return result

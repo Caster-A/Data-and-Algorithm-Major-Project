@@ -16,3 +16,11 @@ def calculate_mape(y_true, y_pred):
         return np.nan
 
     return np.mean(np.abs((y_true[valid_mask] - y_pred[valid_mask]) / y_true[valid_mask]))
+
+
+def calculate_rmse(y_true, y_pred):
+    """计算 RMSE（Root Mean Squared Error）"""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
