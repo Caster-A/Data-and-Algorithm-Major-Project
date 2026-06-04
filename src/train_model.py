@@ -72,6 +72,9 @@ ENHANCED_FEATURE_COLS = {
     "combo_session",
 }
 SUBMISSION_COLUMNS = ["tollgate_id", "time_window", "direction", "volume"]
+PER_COMBO_PRED_COL = "per_combo_xgboost_pred"
+UNIFIED_PRED_COL = "xgboost_pred"
+HYBRID_PRED_COL = "hybrid_xgboost_pred"
 
 
 def load_feature_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -241,12 +244,63 @@ def build_validation_predictions(
     )
     result["xgboost_abs_pct_error"] = np.where(
         result[TARGET_COL] != 0,
-        np.abs(result[TARGET_COL] - result["xgboost_pred"]) / result[TARGET_COL],
+        np.abs(result[TARGET_COL] - result[UNIFIED_PRED_COL]) / result[TARGET_COL],
+        np.nan,
+    )
+    result["per_combo_xgboost_abs_pct_error"] = np.where(
+        result[TARGET_COL] != 0,
+        np.abs(result[TARGET_COL] - result[PER_COMBO_PRED_COL]) / result[TARGET_COL],
         np.nan,
     )
     return result.sort_values(["target_time", "tollgate_id", "direction"]).reset_index(
         drop=True
     )
+
+
+def choose_combo_model_map(validation_predictions: pd.DataFrame) -> dict[str, str]:
+    """为每个组合选择统一 XGBoost 或 per-combo XGBoost 中验证 MAPE 更低者。"""
+    combo_model_map = {}
+    for combo_id, group_df in validation_predictions.groupby("combo_id"):
+        unified_mape = calculate_mape(group_df[TARGET_COL], group_df[UNIFIED_PRED_COL])
+        per_combo_mape = calculate_mape(group_df[TARGET_COL], group_df[PER_COMBO_PRED_COL])
+        combo_model_map[combo_id] = (
+            "per_combo_xgboost" if per_combo_mape < unified_mape else "xgboost"
+        )
+    return combo_model_map
+
+
+def add_hybrid_predictions(
+    validation_predictions: pd.DataFrame,
+    combo_model_map: dict[str, str],
+) -> pd.DataFrame:
+    """按组合选择更优 XGBoost 版本，生成混合验证预测。"""
+    result = validation_predictions.copy()
+    result[HYBRID_PRED_COL] = np.where(
+        result["combo_id"].map(combo_model_map) == "per_combo_xgboost",
+        result[PER_COMBO_PRED_COL],
+        result[UNIFIED_PRED_COL],
+    )
+    result["hybrid_xgboost_abs_pct_error"] = np.where(
+        result[TARGET_COL] != 0,
+        np.abs(result[TARGET_COL] - result[HYBRID_PRED_COL]) / result[TARGET_COL],
+        np.nan,
+    )
+    result["combo_selected_model"] = result["combo_id"].map(combo_model_map)
+    return result
+
+
+def build_hybrid_submission_predictions(
+    predict_features: pd.DataFrame,
+    unified_predictions: np.ndarray,
+    per_combo_predictions: np.ndarray,
+    combo_model_map: dict[str, str],
+) -> np.ndarray:
+    """根据验证集组合级选择结果生成混合提交预测。"""
+    use_per_combo = (
+        predict_features["combo_id"].map(combo_model_map).fillna("xgboost")
+        == "per_combo_xgboost"
+    )
+    return np.where(use_per_combo, per_combo_predictions, unified_predictions)
 
 
 def build_metrics(validation_predictions: pd.DataFrame) -> pd.DataFrame:
