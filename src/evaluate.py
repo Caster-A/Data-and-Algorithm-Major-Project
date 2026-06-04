@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from utils import calculate_mape
+from utils import calculate_mape, calculate_rmse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +80,7 @@ def validate_submission(submission: pd.DataFrame, template: pd.DataFrame) -> lis
 
 
 def build_group_metrics(validation: pd.DataFrame) -> pd.DataFrame:
-    """按多个维度统计各模型的 MAPE。"""
+    """按多个维度统计 Ridge 和 XGBoost 的 MAPE 与 RMSE。"""
     rows = []
     available_models = {
         model_name: pred_col
@@ -106,12 +106,25 @@ def build_group_metrics(validation: pd.DataFrame) -> pd.DataFrame:
             grouped = validation.groupby(group_col)
 
         for group, group_df in grouped:
-            row = {"scope": scope, "group": str(group), "rows": len(group_df)}
-            for model_name, pred_col in available_models.items():
-                row[f"{model_name}_mape"] = calculate_mape(
-                    group_df["target_volume"], group_df[pred_col]
-                )
-            rows.append(row)
+            rows.append(
+                {
+                    "scope": scope,
+                    "group": str(group),
+                    "ridge_mape": calculate_mape(
+                        group_df["target_volume"], group_df["ridge_pred"]
+                    ),
+                    "xgboost_mape": calculate_mape(
+                        group_df["target_volume"], group_df["xgboost_pred"]
+                    ),
+                    "ridge_rmse": calculate_rmse(
+                        group_df["target_volume"], group_df["ridge_pred"]
+                    ),
+                    "xgboost_rmse": calculate_rmse(
+                        group_df["target_volume"], group_df["xgboost_pred"]
+                    ),
+                    "rows": len(group_df),
+                }
+            )
 
     result = pd.DataFrame(rows)
     return result.sort_values(["scope", "group"]).reset_index(drop=True)
@@ -235,22 +248,58 @@ def build_report(
         "",
         f"- Ridge MAPE：`{overall['ridge_mape']:.6f}`",
         f"- XGBoost MAPE：`{overall['xgboost_mape']:.6f}`",
-        f"- Per-combo XGBoost MAPE：`{overall.get('per_combo_xgboost_mape', float('nan')):.6f}`",
-        f"- Hybrid XGBoost MAPE：`{overall.get('hybrid_xgboost_mape', float('nan')):.6f}`",
-        f"- 当前最佳模型：`{best_model}`",
+        f"- Ridge RMSE：`{overall['ridge_rmse']:.6f}`",
+        f"- XGBoost RMSE：`{overall['xgboost_rmse']:.6f}`",
         f"- 验证样本数：`{int(overall['rows'])}`",
         "",
-        "## 2. 提交文件检查",
-        "",
     ]
+    if {
+        "hybrid_xgboost_mape",
+        "enhanced_hybrid_xgboost_mape",
+        "optimized_hybrid_xgboost_mape",
+        "hybrid_xgboost_rmse",
+        "enhanced_hybrid_xgboost_rmse",
+        "optimized_hybrid_xgboost_rmse",
+    }.issubset(metrics.columns):
+        model_overall = metrics[metrics["scope"] == "overall"].iloc[0]
+        mape_improvement = (
+            model_overall["hybrid_xgboost_mape"]
+            - model_overall["optimized_hybrid_xgboost_mape"]
+        )
+        rmse_improvement = (
+            model_overall["hybrid_xgboost_rmse"]
+            - model_overall["optimized_hybrid_xgboost_rmse"]
+        )
+        lines.extend(
+            [
+                "## 1.1 Hybrid 优化对比",
+                "",
+                f"- 原 Hybrid XGBoost MAPE：`{model_overall['hybrid_xgboost_mape']:.6f}`",
+                f"- 纯强化特征 Hybrid MAPE：`{model_overall['enhanced_hybrid_xgboost_mape']:.6f}`",
+                f"- 优化版 Hybrid MAPE：`{model_overall['optimized_hybrid_xgboost_mape']:.6f}`",
+                f"- 原 Hybrid XGBoost RMSE：`{model_overall['hybrid_xgboost_rmse']:.6f}`",
+                f"- 纯强化特征 Hybrid RMSE：`{model_overall['enhanced_hybrid_xgboost_rmse']:.6f}`",
+                f"- 优化版 Hybrid RMSE：`{model_overall['optimized_hybrid_xgboost_rmse']:.6f}`",
+                f"- 相比原 Hybrid MAPE 改善：`{mape_improvement:.6f}`",
+                f"- 相比原 Hybrid RMSE 改善：`{rmse_improvement:.6f}`",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## 2. 提交文件检查",
+            "",
+        ]
+    )
     lines.extend([f"- {item}" for item in submission_checks])
     lines.extend(
         [
             "",
             "## 3. 主要误差来源",
             "",
-            f"- 当前误差最高的收费站方向组合是 `{worst_combo['group']}`，{best_model} MAPE 为 `{worst_combo[best_metric_col]:.6f}`。",
-            f"- 当前误差最高的预测步长是 `horizon_step={worst_horizon['group']}`，{best_model} MAPE 为 `{worst_horizon[best_metric_col]:.6f}`。",
+            f"- 当前误差最高的收费站方向组合是 `{worst_combo['group']}`，XGBoost MAPE 为 `{worst_combo['xgboost_mape']:.6f}`。",
+            f"- 当前误差最高的预测步长是 `horizon_step={worst_horizon['group']}`，XGBoost MAPE 为 `{worst_horizon['xgboost_mape']:.6f}`。",
+            f"- 对应 RMSE 分别为 `{worst_combo['xgboost_rmse']:.6f}` 和 `{worst_horizon['xgboost_rmse']:.6f}`，用于观察绝对流量误差大小。",
             "",
             "## 4. 生成图表",
             "",
@@ -274,7 +323,7 @@ def build_report(
                 "",
                 "## 6. 原始模型指标文件",
                 "",
-                "`data/processed/model_metrics.csv` 已保留训练脚本输出的整体、组合和时段指标。",
+                "`data/processed/model_metrics.csv` 已保留训练脚本输出的整体、组合和时段 MAPE / RMSE 指标。",
             ]
         )
     return "\n".join(lines) + "\n"
@@ -306,11 +355,8 @@ def main() -> None:
     print("Evaluation completed.")
     print(f"Ridge MAPE: {overall['ridge_mape']:.6f}")
     print(f"XGBoost MAPE: {overall['xgboost_mape']:.6f}")
-    if "per_combo_xgboost_mape" in overall:
-        print(f"Per-combo XGBoost MAPE: {overall['per_combo_xgboost_mape']:.6f}")
-    if "hybrid_xgboost_mape" in overall:
-        print(f"Hybrid XGBoost MAPE: {overall['hybrid_xgboost_mape']:.6f}")
-    print(f"Best model: {best_model}")
+    print(f"Ridge RMSE: {overall['ridge_rmse']:.6f}")
+    print(f"XGBoost RMSE: {overall['xgboost_rmse']:.6f}")
     print(f"Group metrics: {PROCESSED_DIR / 'evaluation_group_metrics.csv'}")
     print(f"Report: {REPORT_DIR / '模型评估摘要.md'}")
     print(f"Figures: {FIGURES_DIR}")

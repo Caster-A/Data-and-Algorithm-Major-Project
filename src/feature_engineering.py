@@ -101,10 +101,30 @@ def build_session_samples(
                     "lead_2h_max": lead_array.max(),
                     "lead_2h_min": lead_array.min(),
                     "lead_2h_std": lead_array.std(ddof=0),
+                    "lead_2h_median": float(np.median(lead_array)),
+                    "lead_2h_q25": float(np.quantile(lead_array, 0.25)),
+                    "lead_2h_q75": float(np.quantile(lead_array, 0.75)),
+                    "lead_2h_range": lead_array.max() - lead_array.min(),
+                    "lead_2h_cv": lead_array.std(ddof=0) / max(lead_array.mean(), 1.0),
                     "lead_1h_sum": lead_array[-3:].sum(),
                     "lead_1h_mean": lead_array[-3:].mean(),
+                    "lead_prev_1h_sum": lead_array[:3].sum(),
+                    "lead_prev_1h_mean": lead_array[:3].mean(),
                     "lead_trend": lead_array[-1] - lead_array[0],
+                    "lead_last_vs_mean": lead_array[-1] - lead_array.mean(),
+                    "lead_recent_vs_prev_1h": lead_array[-3:].mean() - lead_array[:3].mean(),
+                    "lead_recent_prev_ratio": lead_array[-3:].mean()
+                    / max(lead_array[:3].mean(), 1.0),
                 }
+                lead_diffs = np.diff(lead_array)
+                for diff_idx, diff_value in enumerate(lead_diffs, start=1):
+                    lead_stats[f"lead_diff_{diff_idx}"] = diff_value
+                lead_stats["lead_diff_mean"] = lead_diffs.mean()
+                lead_stats["lead_diff_std"] = lead_diffs.std(ddof=0)
+                lead_stats["lead_acceleration"] = lead_diffs[-1] - lead_diffs[0]
+                lead_stats["lead_slope"] = float(
+                    np.polyfit(np.arange(LEAD_WINDOW_COUNT), lead_array, 1)[0]
+                )
 
                 for horizon_step in range(1, HORIZON_COUNT + 1):
                     target_time = target_start + pd.Timedelta(
@@ -117,6 +137,7 @@ def build_session_samples(
                         "time_window": make_time_window(target_time),
                         "session": session_config["session"],
                         "horizon_step": horizon_step,
+                        "known_cutoff_time": target_start,
                         "date": target_time.date().isoformat(),
                         "hour": target_time.hour,
                         "minute": target_time.minute,
@@ -204,14 +225,30 @@ def add_historical_features(samples: pd.DataFrame, history: pd.DataFrame) -> pd.
             >= target_time - pd.Timedelta(days=7)
         ]
         previous_day_time = target_time - pd.Timedelta(days=1)
+        previous_2day_time = target_time - pd.Timedelta(days=2)
+        previous_3day_time = target_time - pd.Timedelta(days=3)
+        previous_week_time = target_time - pd.Timedelta(days=7)
         previous_day_value = history.loc[
             base_mask & (history["time_window_start"] == previous_day_time),
+            "volume",
+        ]
+        previous_2day_value = history.loc[
+            base_mask & (history["time_window_start"] == previous_2day_time),
+            "volume",
+        ]
+        previous_3day_value = history.loc[
+            base_mask & (history["time_window_start"] == previous_3day_time),
+            "volume",
+        ]
+        previous_week_value = history.loc[
+            base_mask & (history["time_window_start"] == previous_week_time),
             "volume",
         ]
 
         history_features = {
             "hist_combo_mean": _safe_stat(combo_history["volume"], "mean"),
             "hist_combo_median": _safe_stat(combo_history["volume"], "median"),
+            "hist_combo_std": _safe_stat(combo_history["volume"], "std"),
             "hist_combo_window_mean": _safe_stat(
                 same_window_history["volume"], "mean"
             ),
@@ -232,12 +269,27 @@ def add_historical_features(samples: pd.DataFrame, history: pd.DataFrame) -> pd.
                 recent_7day_history["volume"], "mean"
             ),
             "previous_day_same_window_volume": _safe_stat(previous_day_value, "last"),
+            "previous_2day_same_window_volume": _safe_stat(previous_2day_value, "last"),
+            "previous_3day_same_window_volume": _safe_stat(previous_3day_value, "last"),
+            "previous_week_same_window_volume": _safe_stat(previous_week_value, "last"),
         }
         rows.append(history_features)
 
     history_features = pd.DataFrame(rows)
     history_features = history_features.fillna(global_mean)
-    return pd.concat([samples.reset_index(drop=True), history_features], axis=1)
+    result = pd.concat([samples.reset_index(drop=True), history_features], axis=1)
+
+    denominator = result["hist_combo_window_mean"].clip(lower=1.0)
+    result["lead_mean_vs_hist_window"] = result["lead_2h_mean"] - result["hist_combo_window_mean"]
+    result["lead_sum_vs_hist_window"] = result["lead_2h_sum"] - result["hist_combo_window_mean"] * LEAD_WINDOW_COUNT
+    result["lead_mean_hist_window_ratio"] = result["lead_2h_mean"] / denominator
+    result["previous_day_vs_hist_window"] = (
+        result["previous_day_same_window_volume"] - result["hist_combo_window_mean"]
+    )
+    result["previous_day_hist_window_ratio"] = (
+        result["previous_day_same_window_volume"] / denominator
+    )
+    return result
 
 
 def load_weather_features() -> pd.DataFrame:
@@ -361,6 +413,12 @@ def finalize_features(samples: pd.DataFrame, route_features: pd.DataFrame) -> pd
         result["tollgate_id"].astype(str) + "_" + result["direction"].astype(str)
     )
     result["session_id"] = result["session"].map({"morning": 0, "evening": 1})
+    result["combo_code"] = result["combo_id"].map(
+        {"1_0": 0, "1_1": 1, "2_0": 2, "3_0": 3, "3_1": 4}
+    )
+    result["session_horizon"] = result["session_id"] * HORIZON_COUNT + result["horizon_step"]
+    result["combo_horizon"] = result["combo_code"] * HORIZON_COUNT + result["horizon_step"]
+    result["combo_session"] = result["combo_code"] * 2 + result["session_id"]
     result = result.sort_values(["target_time", "tollgate_id", "direction"]).reset_index(
         drop=True
     )

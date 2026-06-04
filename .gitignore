@@ -10,8 +10,15 @@ __pycache__/
 data/raw/*
 data/processed/*
 data/submission/*
-figures/*
-report/*.pptx
+figures/
+ppt/
+visualization/
+report/**/*.ppt
+report/**/*.pptx
+report/**/*.pptm
+文档/**/*.ppt
+文档/**/*.pptx
+文档/**/*.pptm
 report/*.pdf
 report/*.docx
 
@@ -19,7 +26,6 @@ report/*.docx
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/submission/.gitkeep
-!figures/.gitkeep
 !report/.gitkeep
 
 # Model artifacts
